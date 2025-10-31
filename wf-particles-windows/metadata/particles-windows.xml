@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<wayfire>
+	<plugin name="shatter">
+		<_short>particles windows</_short>
+		<_long>particles windows</_long>
+		<category>Effects</category>
+		<option name="pixel_duration" type="animation">
+				<_short>Pixel Disintegration Duration</_short>
+				<_long>Sets the duration for the pixel disintegration animation in milliseconds.</_long>
+				<default>1200ms linear</default>
+			</option>
+			<option name="pixel_block_size" type="int">
+				<_short>Pixel block size</_short>
+				<_long>Size of each pixel block in pixels.</_long>
+				<default>10</default>
+				<min>1</min>
+				<max>100</max>
+			</option>
+	</plugin>
+</wayfire>
