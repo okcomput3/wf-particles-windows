@@ -1,10 +1,46 @@
 <?xml version="1.0"?>
 <wayfire>
-	<plugin name="shatter">
-		<_short>particles windows</_short>
-		<_long>particles windows</_long>
+	<plugin name="extra-animations">
+		<_short>Extra Animations</_short>
+		<_long>Extra animations to extend animate plugin</_long>
 		<category>Effects</category>
-		<option name="pixel_duration" type="animation">
+		<group>
+			<_short>Blinds Settings</_short>
+			<option name="blinds_duration" type="animation">
+				<_short>Blinds duration</_short>
+				<_long>Sets the duration for the blinds animation in milliseconds.</_long>
+				<default>700ms linear</default>
+			</option>
+			<option name="blinds_strip_height" type="int">
+				<_short>Blinds strip height</_short>
+				<_long>Height of each blinds strip in pixels.</_long>
+				<default>20</default>
+				<min>10</min>
+			</option>
+		</group>
+		<group>
+			<_short>Helix Settings</_short>
+			<option name="helix_duration" type="animation">
+				<_short>Helix duration</_short>
+				<_long>Sets the duration for the helix animation in milliseconds.</_long>
+				<default>700ms linear</default>
+			</option>
+			<option name="helix_rotations" type="int">
+				<_short>Helix rotations</_short>
+				<_long>Number of rotations for the helix animation.</_long>
+				<default>2</default>
+				<min>1</min>
+			</option>
+			<option name="helix_strip_height" type="int">
+				<_short>Helix strip height</_short>
+				<_long>Height of each helix strip in pixels.</_long>
+				<default>20</default>
+				<min>10</min>
+			</option>
+		</group>
+		<group>
+			<_short>Pixel Disintegration Settings</_short>
+			<option name="pixel_duration" type="animation">
 				<_short>Pixel Disintegration Duration</_short>
 				<_long>Sets the duration for the pixel disintegration animation in milliseconds.</_long>
 				<default>1200ms linear</default>
@@ -16,5 +52,64 @@
 				<min>1</min>
 				<max>100</max>
 			</option>
+		</group>
+		<group>
+			<_short>Vortex Settings</_short>
+			<option name="vortex_duration" type="animation">
+				<_short>Vortex duration</_short>
+				<_long>Sets the duration for the vortex animation in milliseconds.</_long>
+				<default>1000ms linear</default>
+			</option>
+		</group>
+		<group>
+			<_short>Melt Settings</_short>
+			<option name="melt_duration" type="animation">
+				<_short>Melt duration</_short>
+				<_long>Sets the duration for the melt animation in milliseconds.</_long>
+				<default>1200ms linear</default>
+			</option>
+			<option name="melt_block_size" type="int">
+				<_short>Melt block size</_short>
+				<_long>Size of each melt block in pixels.</_long>
+				<default>10</default>
+				<min>1</min>
+				<max>100</max>
+			</option>
+		</group>
+		<group>
+			<_short>Dodge Settings</_short>
+			<option name="dodge_toggle" type="bool">
+				<_short>Enable Dodge</_short>
+				<_long>Enables the Dodge focus animation.</_long>
+				<default>false</default>
+			</option>
+			<option name="dodge_duration" type="animation">
+				<_short>Duration</_short>
+				<_long>Sets the animation duration in milliseconds.</_long>
+				<default>350ms linear</default>
+			</option>
+			<option name="dodge_rotate" type="bool">
+				<_short>Rotate</_short>
+				<_long>Rotate windows during animation.</_long>
+				<default>false</default>
+			</option>
+			<option name="dodge_direction" type="string">
+				<_short>Animation Direction</_short>
+				<_long>Sets the animation direction.</_long>
+				<desc>
+					<value>cardinal</value>
+					<_name>Cardinal</_name>
+				</desc>
+				<desc>
+					<value>diagonal</value>
+					<_name>Diagonal</_name>
+				</desc>
+				<desc>
+					<value>circular</value>
+					<_name>Circular</_name>
+				</desc>
+				<default>cardinal</default>
+			</option>
+		</group>
 	</plugin>
 </wayfire>
