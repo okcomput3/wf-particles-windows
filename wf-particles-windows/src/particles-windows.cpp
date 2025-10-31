@@ -1,7 +1,7 @@
 /*
  * The MIT License (MIT)
  *
- * Copyright (c) 2024 Scott Moreau <oreaus@gmail.com>
+ * Copyright (c) 2025 Andrew Pliatsikas
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -40,24 +40,21 @@
 #include <wayfire/plugins/animate/animate.hpp>
 #include <wayfire/util.hpp>
 
-static const char *pixel_vert_source =
+// Optimized: Vertex shader no longer needs to handle UVs.
+static const char *melt_vert_source =
     R"(
 #version 100
 
 attribute highp vec2 position;
-attribute highp vec2 uv_in;
-
 uniform mat4 matrix;
 
-varying highp vec2 uv;
-
 void main() {
-    uv = uv_in;
     gl_Position = matrix * vec4(position, 0.0, 1.0);
 }
 )";
 
-static const char *pixel_frag_source =
+// Optimized: Fragment shader takes UVs as uniforms.
+static const char *melt_frag_source =
     R"(
 #version 100
 @builtin_ext@
@@ -65,73 +62,62 @@ static const char *pixel_frag_source =
 
 precision highp float;
 
-varying highp vec2 uv;
 uniform highp float alpha;
+uniform highp vec2 uv_center;
 uniform highp vec2 uv_actual;
 uniform highp float color_blend;
 
 void main()
 {
-    vec4 pixel_center = get_pixel(uv);
+    vec4 pixel_center = get_pixel(uv_center);
     vec4 pixel_actual = get_pixel(uv_actual);
-    
-    // Blend between center color (dispersed) and actual texture position (together)
     vec4 pixel = mix(pixel_actual, pixel_center, color_blend);
-    
     gl_FragColor = vec4(pixel.rgb * alpha, pixel.a * alpha);
 }
 )";
 
 namespace wf
 {
-namespace shatter
+namespace melt
 {
 using namespace wf::scene;
 using namespace wf::animate;
 using namespace wf::animation;
 
-static std::string shatter_transformer_name = "animation-pixel-disintegrate";
+static std::string melt_transformer_name = "animation-melt";
 
-wf::option_wrapper_t<wf::animation_description_t> shatter_duration{"extra-animations/pixel_duration"};
-wf::option_wrapper_t<int> pixel_block_size{"extra-animations/pixel_block_size"};
+wf::option_wrapper_t<wf::animation_description_t> melt_duration{"extra-animations/melt_duration"};
+wf::option_wrapper_t<int> melt_block_size{"extra-animations/melt_block_size"};
 
-struct PixelBlock
+struct MeltBlock
 {
-    float x, y;           // position
-    float velocity_x;     // horizontal velocity
-    float velocity_y;     // vertical velocity (falling)
-    float rotation;       // rotation angle
-    float rotation_speed; // rotation speed
-    float delay;          // delay before starting to fall
-    float scale;          // size variation
+    float x, y;
+    float velocity_x;
+    float velocity_y;
+    float scale;
 };
 
-struct Particle
-{
-    float offset_x, offset_y;  // offset from block center
-    float velocity_x, velocity_y;  // particle velocity
-    float life;  // particle lifetime (0-1)
-    float size;  // particle size
-};
-
-class shatter_animation_t : public duration_t
+class melt_animation_t : public duration_t
 {
   public:
     using duration_t::duration_t;
-    timed_transition_t shatter{*this};
+    timed_transition_t melt{*this};
 };
 
-class shatter_transformer : public wf::scene::view_2d_transformer_t
+class melt_transformer : public wf::scene::view_2d_transformer_t
 {
   public:
     wayfire_view view;
     OpenGL::program_t program;
     wf::output_t *output;
     wf::geometry_t animation_geometry;
-    shatter_animation_t progression{shatter_duration};
-    std::vector<PixelBlock> blocks;
-    std::vector<std::vector<Particle>> particles;  // particles for each block
+    melt_animation_t progression{melt_duration};
+    std::vector<MeltBlock> blocks;
     int grid_width, grid_height;
+
+    // Optimized: Pre-calculate a single unit circle to be reused for all particles.
+    static constexpr int CIRCLE_SEGMENTS = 20;
+    std::vector<float> unit_circle_vertices;
 
     class simple_node_render_instance_t : public wf::scene::transformer_render_instance_t<transformer_base_node_t>
     {
@@ -141,12 +127,12 @@ class shatter_transformer : public wf::scene::view_2d_transformer_t
             push_to_parent(ev->region);
         };
 
-        shatter_transformer *self;
+        melt_transformer *self;
         wayfire_view view;
         damage_callback push_to_parent;
 
       public:
-        simple_node_render_instance_t(shatter_transformer *self, damage_callback push_damage,
+        simple_node_render_instance_t(melt_transformer *self, damage_callback push_damage,
             wayfire_view view) : wf::scene::transformer_render_instance_t<transformer_base_node_t>(self,
                 push_damage,
                 view->get_output())
@@ -157,8 +143,7 @@ class shatter_transformer : public wf::scene::view_2d_transformer_t
             self->connect(&on_node_damaged);
         }
 
-        ~simple_node_render_instance_t()
-        {}
+        ~simple_node_render_instance_t() {}
 
         void schedule_instructions(
             std::vector<render_instruction_t>& instructions,
@@ -184,7 +169,6 @@ class shatter_transformer : public wf::scene::view_2d_transformer_t
             auto progress = self->progression.progress();
             auto og = self->output->get_relative_geometry();
 
-            // Easing function for smooth acceleration
             auto ease_out_cubic = [](float t) {
                 return 1.0f - std::pow(1.0f - t, 3.0f);
             };
@@ -195,190 +179,80 @@ class shatter_transformer : public wf::scene::view_2d_transformer_t
                 GL_CALL(glDisable(GL_CULL_FACE));
                 GL_CALL(glEnable(GL_BLEND));
                 GL_CALL(glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
+
                 self->program.use(wf::TEXTURE_TYPE_RGBA);
                 self->program.set_active_texture(gl_tex);
+                self->program.attrib_pointer("position", 2, 0, self->unit_circle_vertices.data());
 
-                // Render particles only (no blocks)
-                for (size_t i = 0; i < self->blocks.size(); i++)
+                const auto output_matrix = wf::gles::output_transform(data.target);
+                const int block_size = melt_block_size;
+
+                for (const auto& block : self->blocks)
                 {
-                    auto& block = self->blocks[i];
-                    
-                    // All blocks animate together - no delay
-                    float adjusted_progress = progress;
-                    
+                    // MODIFIED: Removed the wave_delay calculation to make all particles disperse at once.
+                    // The animation progress is now the same for all particles.
+                    float adjusted_progress = static_cast<float>(progress);
                     float eased_progress = ease_out_cubic(adjusted_progress);
-                    
-                    // Calculate physics - no gravity, just velocity-based movement
-                    float new_x = block.x + block.velocity_x * eased_progress * 300.0f;
-                    float new_y = block.y + block.velocity_y * eased_progress * 300.0f;
-                    
-                    // Fade out as particles move
+
                     float alpha = 1.0f - eased_progress;
-                    
-                    // Scale variation
-                    float scale = block.scale * (1.0f - eased_progress * 0.3f);
-                    
-                    // Color interpolation: when coming together (progress decreasing), 
-                    // interpolate from center sample to actual texture position
-                    float color_blend = eased_progress;  // 0 = actual texture, 1 = center color
-                    
-                    // Skip if completely transparent
                     if (alpha <= 0.01f)
                     {
                         continue;
                     }
+
+                    float new_x = block.x + block.velocity_x * eased_progress * 300.0f;
+                    float new_y = block.y + block.velocity_y * eased_progress * 300.0f;
+                    float scale = block.scale * (1.0f - eased_progress * 0.3f);
                     
-                    int block_size = pixel_block_size;
-                    
-                    // Calculate particle center
+                    // Calculate particle center in logical output coordinates.
                     float particle_center_x = new_x + block_size / 2.0f;
                     float particle_center_y = new_y + block_size / 2.0f;
-                    
-                    // Position in screen space
+
+                    // Manually convert logical coordinates to Normalized Device Coordinates (NDC).
                     float screen_x = ((particle_center_x + src_box.x - og.width / 2.0f) / og.width) * 2.0f;
-                    float screen_y = ((-particle_center_y + og.height / 2.0f - src_box.y) / og.height) * 2.0f;
+                    float screen_y = ((-particle_center_y - src_box.y + og.height / 2.0f) / og.height) * 2.0f;
                     
-                    // Interpolate blending mode: additive when dispersed, normal when together
-                    if (eased_progress > 0.5f)
-                    {
-                        // Use additive blending for glowing particles when dispersed
+                    if (eased_progress > 0.5f) {
                         GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE));
-                    }
-                    else
-                    {
-                        // Transition to normal blending when coming together
+                    } else {
                         GL_CALL(glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
                     }
-                    
-                    // Sample color from block center
+
+                    // Set UV and color blend uniforms
                     float block_center_u = (block.x + block_size / 2.0f) / src_box.width;
                     float block_center_v = 1.0f - ((block.y + block_size / 2.0f) / src_box.height);
-                    block_center_u = std::clamp(block_center_u, 0.0f, 1.0f);
-                    block_center_v = std::clamp(block_center_v, 0.0f, 1.0f);
-                    
-                    // Calculate actual texture position for this particle
-                    float actual_u = (block.x + block_size / 2.0f) / src_box.width;
-                    float actual_v = 1.0f - ((block.y + block_size / 2.0f) / src_box.height);
-                    actual_u = std::clamp(actual_u, 0.0f, 1.0f);
-                    actual_v = std::clamp(actual_v, 0.0f, 1.0f);
-                    
-                    glm::mat4 model(1.0f);
-                    model = glm::translate(model, glm::vec3(screen_x, screen_y, 0.0f));
-                    model = glm::scale(model, glm::vec3(2.0f / og.width, 2.0f / og.height, 1.0f));
-                    
-                    // Set shader uniforms for color blending
-                    self->program.uniform2f("uv_actual", actual_u, actual_v);
-                    self->program.uniform1f("color_blend", color_blend);
-                    
-                    // Draw outer glow halo (larger, more transparent)
-                    {
-                        int num_segments = 20;
-                        std::vector<float> vertices;
-                        std::vector<float> uv;
-                        
-                        float glow_radius = (block_size * scale) * 0.8f;  // Larger radius for glow
-                        
-                        // Center vertex
-                        vertices.push_back(0.0f);
-                        vertices.push_back(0.0f);
-                        uv.push_back(block_center_u);
-                        uv.push_back(block_center_v);
-                        
-                        // Circle vertices
-                        for (int seg = 0; seg <= num_segments; seg++)
-                        {
-                            float angle = (seg / float(num_segments)) * 2.0f * M_PI;
-                            vertices.push_back(std::cos(angle) * glow_radius);
-                            vertices.push_back(std::sin(angle) * glow_radius);
-                            uv.push_back(block_center_u);
-                            uv.push_back(block_center_v);
-                        }
-                        
-                        self->program.uniformMatrix4f("matrix",
-                            wf::gles::output_transform(data.target) * model);
-                        // Keep glow constant, color interpolation handled by shader
-                        self->program.uniform1f("alpha", alpha * 1.5f);
-                        self->program.attrib_pointer("position", 2, 0, vertices.data());
-                        self->program.attrib_pointer("uv_in", 2, 0, uv.data());
-                        GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, num_segments + 2));
-                    }
-                    
-                    // Draw middle glow layer
-                    {
-                        int num_segments = 18;
-                        std::vector<float> vertices;
-                        std::vector<float> uv;
-                        
-                        float mid_radius = (block_size * scale) * 0.6f;
-                        
-                        // Center vertex
-                        vertices.push_back(0.0f);
-                        vertices.push_back(0.0f);
-                        uv.push_back(block_center_u);
-                        uv.push_back(block_center_v);
-                        
-                        // Circle vertices
-                        for (int seg = 0; seg <= num_segments; seg++)
-                        {
-                            float angle = (seg / float(num_segments)) * 2.0f * M_PI;
-                            vertices.push_back(std::cos(angle) * mid_radius);
-                            vertices.push_back(std::sin(angle) * mid_radius);
-                            uv.push_back(block_center_u);
-                            uv.push_back(block_center_v);
-                        }
-                        
-                        self->program.uniformMatrix4f("matrix",
-                            wf::gles::output_transform(data.target) * model);
-                        // Keep glow constant, color interpolation handled by shader
-                        self->program.uniform1f("alpha", alpha * 2.5f);
-                        self->program.attrib_pointer("position", 2, 0, vertices.data());
-                        self->program.attrib_pointer("uv_in", 2, 0, uv.data());
-                        GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, num_segments + 2));
-                    }
-                    
-                    // Draw bright core particle
-                    {
-                        int num_segments = 16;
-                        std::vector<float> vertices;
-                        std::vector<float> uv;
-                        
-                        float particle_radius = (block_size * scale) / 2.5f;  // Smaller core
-                        
-                        // Center vertex
-                        vertices.push_back(0.0f);
-                        vertices.push_back(0.0f);
-                        uv.push_back(block_center_u);
-                        uv.push_back(block_center_v);
-                        
-                        // Circle vertices
-                        for (int seg = 0; seg <= num_segments; seg++)
-                        {
-                            float angle = (seg / float(num_segments)) * 2.0f * M_PI;
-                            vertices.push_back(std::cos(angle) * particle_radius);
-                            vertices.push_back(std::sin(angle) * particle_radius);
-                            uv.push_back(block_center_u);
-                            uv.push_back(block_center_v);
-                        }
-                        
-                        self->program.uniformMatrix4f("matrix",
-                            wf::gles::output_transform(data.target) * model);
-                        // Keep glow constant, color interpolation handled by shader
-                        self->program.uniform1f("alpha", alpha * 4.0f);
-                        self->program.attrib_pointer("position", 2, 0, vertices.data());
-                        self->program.attrib_pointer("uv_in", 2, 0, uv.data());
-                        GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, num_segments + 2));
-                    }
-                    
-                    // Restore normal blending
-                    GL_CALL(glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
-                }
+                    float actual_u = (new_x + block_size / 2.0f) / src_box.width;
+                    float actual_v = 1.0f - ((new_y + block_size / 2.0f) / src_box.height);
 
+                    self->program.uniform2f("uv_center", std::clamp(block_center_u, 0.0f, 1.0f), std::clamp(block_center_v, 0.0f, 1.0f));
+                    self->program.uniform2f("uv_actual", std::clamp(actual_u, 0.0f, 1.0f), std::clamp(actual_v, 0.0f, 1.0f));
+                    self->program.uniform1f("color_blend", eased_progress);
+
+                    // Draw layers using matrices built for NDC space.
+                    auto draw_layer = [&](float radius_multiplier, float alpha_multiplier) {
+                        float radius = (block_size * scale) * radius_multiplier;
+                        
+                        glm::mat4 model(1.0f);
+                        model = glm::translate(model, glm::vec3(screen_x, screen_y, 0.0f));
+                        // Scale the unit circle by the radius converted to NDC size.
+                        model = glm::scale(model, glm::vec3(radius * 2.0f / og.width, radius * 2.0f / og.height, 1.0f));
+                        
+                        self->program.uniformMatrix4f("matrix", output_matrix * model);
+                        self->program.uniform1f("alpha", alpha * alpha_multiplier);
+                        GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, self->CIRCLE_SEGMENTS + 2));
+                    };
+
+                    draw_layer(0.8f, 1.5f); // Outer glow
+                    draw_layer(0.6f, 2.5f); // Middle glow
+                    draw_layer(0.4f, 4.0f); // Core particle (1.0 / 2.5 = 0.4)
+                }
+                GL_CALL(glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
                 self->program.deactivate();
             });
         }
     };
 
-    shatter_transformer(wayfire_view view, wf::geometry_t bbox) : wf::scene::view_2d_transformer_t(view)
+    melt_transformer(wayfire_view view, wf::geometry_t bbox) : wf::scene::view_2d_transformer_t(view)
     {
         this->view = view;
         if (view->get_output())
@@ -387,79 +261,52 @@ class shatter_transformer : public wf::scene::view_2d_transformer_t
             output->render->add_effect(&pre_hook, wf::OUTPUT_EFFECT_PRE);
         }
 
-        auto og = output->get_relative_geometry();
-        animation_geometry = og;
+        animation_geometry = output->get_relative_geometry();
         
         wf::gles::run_in_context([&]
         {
-            program.compile(pixel_vert_source, pixel_frag_source);
+            program.compile(melt_vert_source, melt_frag_source);
         });
 
-        // Initialize random seed
+        // Optimized: Pre-generate vertices for a unit circle.
+        unit_circle_vertices.reserve((CIRCLE_SEGMENTS + 2) * 2);
+        unit_circle_vertices.push_back(0.0f); // Center vertex
+        unit_circle_vertices.push_back(0.0f);
+        for (int i = 0; i <= CIRCLE_SEGMENTS; ++i) {
+            float angle = (i / float(CIRCLE_SEGMENTS)) * 2.0f * M_PI;
+            unit_circle_vertices.push_back(std::cos(angle));
+            unit_circle_vertices.push_back(std::sin(angle));
+        }
+
         std::srand(std::time(nullptr));
         
-        // Create grid of pixel blocks
-        int block_size = pixel_block_size;
+        int block_size = melt_block_size;
         grid_width = (bbox.width + block_size - 1) / block_size;
         grid_height = (bbox.height + block_size - 1) / block_size;
         
+        blocks.reserve(grid_width * grid_height);
         for (int row = 0; row < grid_height; row++)
         {
             for (int col = 0; col < grid_width; col++)
             {
-                PixelBlock block;
+                MeltBlock block;
                 block.x = col * block_size;
                 block.y = row * block_size;
-                
-                // Random velocities for varied movement in all directions
                 block.velocity_x = (std::rand() / float(RAND_MAX) - 0.5f) * 2.0f;
                 block.velocity_y = (std::rand() / float(RAND_MAX) - 0.5f) * 2.0f;
-                
-                // Random rotation
-                block.rotation = 0.0f;
-                block.rotation_speed = (std::rand() / float(RAND_MAX) - 0.5f) * 6.28f * 2.0f;
-                
-                // Random scale variation
                 block.scale = 0.9f + (std::rand() / float(RAND_MAX)) * 0.2f;
-                
                 blocks.push_back(block);
-                
-                // Create particles for this block
-                std::vector<Particle> block_particles;
-                int num_particles = 5 + (std::rand() % 8);  // 5-12 particles per block for better glow
-                for (int p = 0; p < num_particles; p++)
-                {
-                    Particle particle;
-                    // Random position around block edges
-                    particle.offset_x = (std::rand() / float(RAND_MAX)) * block_size - block_size / 2.0f;
-                    particle.offset_y = (std::rand() / float(RAND_MAX)) * block_size - block_size / 2.0f;
-                    // Random velocity trailing behind
-                    particle.velocity_x = (std::rand() / float(RAND_MAX) - 0.5f) * 0.5f;
-                    particle.velocity_y = (std::rand() / float(RAND_MAX) - 0.5f) * 0.5f;
-                    particle.life = 0.5f + (std::rand() / float(RAND_MAX)) * 0.5f;  // varying lifetimes
-                    particle.size = 3.0f + (std::rand() / float(RAND_MAX)) * 5.0f;  // 3-8 pixel size for more glow
-                    block_particles.push_back(particle);
-                }
-                particles.push_back(block_particles);
             }
         }
     }
 
-    wf::geometry_t get_bounding_box() override
-    {
-        return this->animation_geometry;
-    }
-
-    wf::effect_hook_t pre_hook = [=] ()
-    {
-        output->render->damage(animation_geometry);
-    };
+    wf::geometry_t get_bounding_box() override { return this->animation_geometry; }
+    wf::effect_hook_t pre_hook = [=] () { output->render->damage(animation_geometry); };
 
     void gen_render_instances(std::vector<render_instance_uptr>& instances,
         damage_callback push_damage, wf::output_t *shown_on) override
     {
-        instances.push_back(std::make_unique<simple_node_render_instance_t>(
-            this, push_damage, view));
+        instances.push_back(std::make_unique<simple_node_render_instance_t>(this, push_damage, view));
     }
 
     void init_animation(bool hiding)
@@ -468,25 +315,21 @@ class shatter_transformer : public wf::scene::view_2d_transformer_t
         {
             this->progression.reverse();
         }
-
         this->progression.start();
     }
 
-    virtual ~shatter_transformer()
+    virtual ~melt_transformer()
     {
         if (output)
         {
             output->render->rem_effect(&pre_hook);
         }
 
-        wf::gles::run_in_context_if_gles([&]
-        {
-            program.free_resources();
-        });
+        wf::gles::run_in_context_if_gles([&] { program.free_resources(); });
     }
 };
 
-class shatter_animation : public animation_base_t
+class melt_animation : public animation_base_t
 {
     wayfire_view view;
 
@@ -497,53 +340,38 @@ class shatter_animation : public animation_base_t
         pop_transformer(view);
         auto bbox = view->get_transformed_node()->get_bounding_box();
         auto tmgr = view->get_transformed_node();
-        auto node = std::make_shared<shatter_transformer>(view, bbox);
-        tmgr->add_transformer(node, wf::TRANSFORMER_HIGHLEVEL + 1, shatter_transformer_name);
+        auto node = std::make_shared<melt_transformer>(view, bbox);
+        tmgr->add_transformer(node, wf::TRANSFORMER_HIGHLEVEL + 1, melt_transformer_name);
         node->init_animation(type & WF_ANIMATE_HIDING_ANIMATION);
     }
 
     void pop_transformer(wayfire_view view)
     {
-        if (view->get_transformed_node()->get_transformer(shatter_transformer_name))
+        if (view->get_transformed_node()->get_transformer(melt_transformer_name))
         {
-            view->get_transformed_node()->rem_transformer(shatter_transformer_name);
+            view->get_transformed_node()->rem_transformer(melt_transformer_name);
         }
     }
 
     bool step() override
     {
-        if (!view)
-        {
-            return false;
-        }
+        if (!view || !view->get_transformed_node()) { return false; }
 
-        auto tmgr = view->get_transformed_node();
-        if (!tmgr)
+        if (auto tr = view->get_transformed_node()->get_transformer<melt_transformer>(melt_transformer_name))
         {
-            return false;
-        }
-
-        if (auto tr =
-                tmgr->get_transformer<shatter_transformer>(shatter_transformer_name))
-        {
-            auto running = tr->progression.running();
-            if (!running)
+            if (!tr->progression.running())
             {
                 pop_transformer(view);
                 return false;
             }
-
-            return running;
+            return true;
         }
-
         return false;
     }
 
     void reverse() override
     {
-        if (auto tr =
-                view->get_transformed_node()->get_transformer<shatter_transformer>(
-                    shatter_transformer_name))
+        if (auto tr = view->get_transformed_node()->get_transformer<melt_transformer>(melt_transformer_name))
         {
             tr->progression.reverse();
         }
