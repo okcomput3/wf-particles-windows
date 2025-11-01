@@ -242,9 +242,9 @@ class melt_transformer : public wf::scene::view_2d_transformer_t
                         GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, self->CIRCLE_SEGMENTS + 2));
                     };
 
-                    draw_layer(0.8f, 1.5f); // Outer glow
-                    draw_layer(0.6f, 2.5f); // Middle glow
-                    draw_layer(0.4f, 4.0f); // Core particle (1.0 / 2.5 = 0.4)
+                    draw_layer(0.8f, 1.0+(0.5f*(1-alpha))); // Outer glow
+                    draw_layer(0.6f, 1.0+(1.5f*(1-alpha))); // Middle glow
+                    draw_layer(0.4f, 1.0+(3.0f*(1-alpha))); // Core particle (1.0 / 2.5 = 0.4)
                 }
                 GL_CALL(glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
                 self->program.deactivate();
